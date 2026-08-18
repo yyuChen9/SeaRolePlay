@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/configs/qwen3_5_0_8b_lora_sft.yaml}"
+CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/configs/qwen3_5_9b_lora_sft.yaml}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DATA_FILE="${DATA_FILE:-$ROOT_DIR/data/character_sft_combined.json}"
 
