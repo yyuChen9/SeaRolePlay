@@ -1,0 +1,16 @@
+# Hugging Face and Python caches
+.cache/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Local credentials and environment files
+.env
+*.token
+
+# Raw/private training data and generated model artifacts
+data/*.json
+data/raw/
+!data/dataset_info.json
+saves/*
+!saves/.gitkeep
