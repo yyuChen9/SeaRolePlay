@@ -1,2 +1,60 @@
+# Verified training environment for this project (conda env `roleplay`).
+#
+# Python 3.12  —  GPU: NVIDIA H200 (sm90)  —  CUDA wheels: cu128
+# Validated 2026-08-18 by a 20-sample LoRA SFT run on Qwen/Qwen3.5-9B
+# that completed forward/backward and checkpoint saving.
+#
+# The torch stack is NOT installable from PyPI alone; it needs the PyTorch
+# CUDA index. Install in two steps, in this order:
+#
+#   conda create -n roleplay python=3.12 -y && conda activate roleplay
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
+#
+# For a byte-exact reproduction of the validated env, use requirements-lock.txt.
+
+### torch stack — all three versions must match exactly
+# torchaudio is a HARD dependency of llamafactory (unguarded `import torchaudio`
+# in llamafactory/data/mm_plugin.py), and its compiled extension is built against
+# one specific torch version. A mismatch fails at import with:
+#   OSError: _torchaudio.abi3.so: undefined symbol: torch_library_impl
+# Never leave torchaudio/torchvision unpinned -- pip resolves them to the newest
+# release, which will not match a pinned older torch.
+#
+# torch is pinned to 2.8.0, NOT a 2.9.x release. llamafactory 0.9.5 hard-blocks
+# torch >=2.9.0,<2.10.0 for any model containing Conv3d
+# (llamafactory/model/loader.py:199, see pytorch/pytorch#166122).
+# Qwen3.5 is multimodal -- its vision tower has Conv3d for video patch
+# embedding -- so the check fires even for pure text training.
+# 2.8.0 is preferred over upgrading past 2.10 because prebuilt flash-attn
+# wheels for cp312 only go up to torch2.8.
+torch==2.8.0
+torchvision==0.23.0
+torchaudio==2.8.0
+
+### training framework
+# 0.9.5 is the version whose behaviour the notes in this file describe;
+# the Conv3d gate and the qwen3_5 templates are both version-specific.
+llamafactory==0.9.5
+
+### data preparation
+# Used directly by scripts/prepare_hf_character_data.py.
+# Everything else (transformers, peft, trl, accelerate, datasets) is pulled in
+# and version-constrained by llamafactory -- do not pin those here, or you risk
+# fighting its resolver.
 huggingface_hub>=0.30.0
-llamafactory
+
+### optional: flash-attention
+# Not installed in the validated env and not required -- training works without
+# it, just slower. There is no PyPI wheel (sdist only, ~30+ min compile), so use
+# the prebuilt release wheel. For py3.12 + torch2.8 the only cp312 builds are
+# cu12, which pairs correctly with the cu128 stack above:
+#
+#   pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+#
+# Verify with `python -c "import flash_attn"` before relying on it; if the
+# import fails, just skip it. A 9B LoRA fits comfortably on an H200 either way.
+
+### verify the install
+#   python -c "import torch, torchaudio, torchvision; print(torch.__version__, torch.cuda.is_available())"
+#   llamafactory-cli version
+# Expected: 2.8.0+cu128 True / LLaMA Factory 0.9.5

@@ -5,6 +5,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="${1:-base}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-9B}"
+TEMPLATE="${TEMPLATE:-qwen3_5_nothink}"
 ADAPTER_PATH="${ADAPTER_PATH:-$ROOT_DIR/saves/qwen3.5-9b/character-lora}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
@@ -23,4 +24,4 @@ else
     LLAMA_FACTORY=("$PYTHON_BIN" -m llamafactory.cli)
 fi
 
-exec "${LLAMA_FACTORY[@]}" chat --model_name_or_path "$MODEL_NAME" --template qwen3 --trust_remote_code true "${EXTRA_ARGS[@]}"
+exec "${LLAMA_FACTORY[@]}" chat --model_name_or_path "$MODEL_NAME" --template "$TEMPLATE" --trust_remote_code true "${EXTRA_ARGS[@]}"

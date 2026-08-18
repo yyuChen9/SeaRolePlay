@@ -2,17 +2,41 @@
 
 这个目录是一个围绕 LLaMA-Factory 的最小、可复现学习项目。LLaMA-Factory 负责训练和推理，本项目负责依赖安装、数据格式转换、数据集注册和实验配置。
 
+当前模型为 `Qwen/Qwen3.5-9B`，训练方式为 LoRA SFT，后续计划使用偏好对做 DPO。
+
 当前状态、环境版本、已知问题和下一步工作见 [`docs/HANDOFF.md`](docs/HANDOFF.md)。
 
-## 安装
+## 环境
+
+已验证环境：Python 3.12 + torch 2.8.0+cu128，GPU 为 NVIDIA H200（sm90）。
 
 ```bash
-bash scripts/install_llamafactory.sh
+conda create -n roleplay python=3.12 -y
+conda activate roleplay
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
+
 bash /workspace/setup_huggingface.sh
 source ~/.bashrc
 ```
 
-`install_llamafactory.sh` 默认优先安装 `/workspace/LLaMA-Factory` 的源码 checkout；不存在时从 PyPI 安装。
+版本约束的具体原因写在 [`requirements.txt`](requirements.txt) 的注释里，简要说：
+
+- `torch` / `torchvision` / `torchaudio` 三者版本必须严格匹配，且都要 pin。torchaudio 是 LLaMA-Factory 的硬依赖，其编译扩展绑定特定 torch 版本，不匹配会在 import 阶段报 `undefined symbol: torch_library_impl`。
+- `torch` 必须避开 `2.9.x`。LLaMA-Factory 0.9.5 会对含 `Conv3d` 的模型硬拦截该区间（见 `llamafactory/model/loader.py`）。Qwen3.5 是多模态模型，视觉塔含 `Conv3d`，即使只训练文本也会触发。
+- 选择降级到 2.8.0 而非升级到 2.10+，是为了保留 flash-attn 预编译 wheel（cp312 只覆盖到 `torch2.8`）。flash-attn 是可选项，不装也能训练。
+
+需要字节级复现已验证环境时使用 [`requirements-lock.txt`](requirements-lock.txt)。
+
+注意：`scripts/install_llamafactory.sh` 使用 `pip install -U llamafactory`，会连带升级 torch 并破坏上述 pin。已按 `requirements.txt` 装好环境后不要再运行它；只在需要安装 `/workspace/LLaMA-Factory` 源码 checkout 时使用，之后重新执行一次 `pip install -r requirements.txt` 校正版本。
+
+验证安装：
+
+```bash
+python -c "import torch, torchaudio, torchvision; print(torch.__version__, torch.cuda.is_available())"
+llamafactory-cli version
+```
+
+预期输出 `2.8.0+cu128 True` 和 `LLaMA Factory 0.9.5`。
 
 ## 准备 Character 数据
 
@@ -45,7 +69,7 @@ python scripts/prepare_character_data.py \
 python scripts/prepare_hf_character_data.py --output-dir data
 ```
 
-脚本会下载固定文件、校验并转换为。两个 SFT 数据集中的 `human/gpt` 会统一成 `user/assistant`；DPO 数据中 `rejected` 为空的记录会跳过并报告，其余格式错误会终止流程。
+脚本会下载固定文件、校验并转换。两个 SFT 数据集中的 `human/gpt` 会统一成 `user/assistant`；DPO 数据中 `rejected` 为空的记录会跳过并报告，其余格式错误会终止流程。
 
 - `storyplay_sonnet35_charcard.json`：`rx1lora/StoryPlay_Sonnet3.5-Charcard-Roleplay`
 - `gryphe_sonnet35_charcard.json`：`Gryphe/Sonnet3.5-Charcard-Roleplay`
@@ -64,6 +88,16 @@ bash scripts/run_chat.sh base
 bash scripts/run_chat.sh lora
 ```
 
-默认模型配置为 `Qwen/Qwen3.5-0.8B`，训练配置位于 `configs/qwen3_5_0_8b_lora_sft.yaml`。需要切换实验时复制一份 YAML，并通过 `CONFIG_PATH=/path/to/config.yaml bash scripts/run_train.sh` 指定，避免 YAML 和命令行参数互相覆盖。
+训练配置位于 [`configs/qwen3_5_9b_lora_sft.yaml`](configs/qwen3_5_9b_lora_sft.yaml)，adapter 输出到 `saves/qwen3.5-9b/character-lora`。
 
-`Qwen3.5-0.8B` 的实际 Hugging Face 仓库名和模板需要以模型发布版本及本地 LLaMA-Factory 版本为准。若 `qwen3` 模板不存在，请按 `llamafactory-cli chat --help` 显示的模板名修改配置。
+模板使用 `qwen3_5_nothink`。LLaMA-Factory 0.9.5 中 `qwen3` 和 `qwen3_5` 是两个不同模板，Qwen3.5 必须用后者。`Qwen/Qwen3.5-9B` 在 LLaMA-Factory 中注册为 Thinking 版本，`_nothink` 变体用于抑制思维链输出；如需保留思维链，改为 `qwen3_5`。
+
+切换实验时复制一份 YAML，并通过环境变量指定，避免 YAML 和命令行参数互相覆盖：
+
+```bash
+CONFIG_PATH=/path/to/config.yaml bash scripts/run_train.sh
+```
+
+不要用命令行参数覆盖 YAML 里的值。在 LLaMA-Factory 0.9.5 中，`llamafactory-cli train config.yaml --max_samples 20` 这类写法会让 HfArgumentParser 把附加参数视为未使用键并报错（`Some keys are not used by the HfArgumentParser`）。所有参数都应写在 YAML 里。
+
+正式训练前建议先用少量样本做 smoke test，复制 YAML 并覆盖 `max_samples`、`num_train_epochs` 和 `output_dir`，不要覆盖正式配置的输出目录。
