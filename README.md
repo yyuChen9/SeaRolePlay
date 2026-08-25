@@ -101,3 +101,31 @@ CONFIG_PATH=/path/to/config.yaml bash scripts/run_train.sh
 不要用命令行参数覆盖 YAML 里的值。在 LLaMA-Factory 0.9.5 中，`llamafactory-cli train config.yaml --max_samples 20` 这类写法会让 HfArgumentParser 把附加参数视为未使用键并报错（`Some keys are not used by the HfArgumentParser`）。所有参数都应写在 YAML 里。
 
 正式训练前建议先用少量样本做 smoke test，复制 YAML 并覆盖 `max_samples`、`num_train_epochs` 和 `output_dir`，不要覆盖正式配置的输出目录。
+
+## DPO 训练
+
+DPO 接在 SFT 之上，需先完成 SFT 训练并生成 `saves/qwen3.5-9b/character-lora`。
+
+```bash
+# 先跑 smoke test 验证启动路径（约 15 秒）
+CONFIG_PATH=configs/qwen3_5_9b_lora_dpo_smoke.yaml bash scripts/run_train.sh
+rm -rf saves/_smoke_dpo
+
+# 正式训练
+CONFIG_PATH=configs/qwen3_5_9b_lora_dpo.yaml bash scripts/run_train.sh
+```
+
+配置为 [`configs/qwen3_5_9b_lora_dpo.yaml`](configs/qwen3_5_9b_lora_dpo.yaml)，adapter 输出到 `saves/qwen3.5-9b/character-dpo`。
+
+几个关键设计：
+
+- `create_new_adapter: true` 会先把 SFT adapter 合并进 base 权重，再随机初始化一个新 adapter 用于 DPO。LoRA 场景下 LLaMA-Factory 不单独加载参考模型，而是用「禁用 adapter 后的模型」作为隐式参考 —— 合并之后它恰好等于 SFT 后的模型，符合 DPO 语义，因此无需指定 `ref_model`。
+- 学习率为 `5.0e-6`，比 SFT 的 `1.0e-4` 低约 20 倍。沿用 SFT 量级的学习率会迅速破坏已对齐的模型，是 DPO 最常见的失败原因。
+- `cutoff_len: 1024`。实测 DPO 数据 `prompt + max(chosen, rejected)` 的 p99 约 683 tokens、最长 728，1024 不会产生截断。
+- `per_device_train_batch_size: 4` 配 `gradient_accumulation_steps: 4`。DPO 每步需前向 chosen 和 rejected 两条序列，显存约为同 batch SFT 的两倍，故 per-device 减半、有效 batch 仍与 SFT 保持 16。
+- 可调超参：`pref_beta`（默认 0.1，越小越允许偏离参考模型）、`pref_loss`（可选 `sigmoid`/`hinge`/`ipo`/`kto_pair`/`orpo`/`simpo`）、`pref_ftx`（叠加 SFT 正则项，角色一致性退化时可设为 0.1 左右）。
+
+训练日志中应关注 `rewards/accuracies`（应逐步上升）和 `rewards/margins`（chosen 与 rejected 的奖励差，应逐步扩大）。第一步这些值为 0 是正常的 —— 此时策略模型与参考模型完全相同。
+
+已知数据局限：SFT 数据是带角色卡 system prompt 的多轮 ShareGPT 对话，而 DPO 数据是不含 system、单轮的 `prompt`/`chosen`/`rejected` 纯字符串。两个阶段的 prompt 分布不一致，DPO 可能冲淡 SFT 学到的角色卡遵循能力。评测时应重点对比 DPO 前后的角色一致性；若出现退化，可考虑调高 `pref_ftx`，或在转换脚本中把 DPO prompt 包装成与 SFT 一致的对话格式。
+

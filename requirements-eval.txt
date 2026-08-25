@@ -1,0 +1,45 @@
+# Evaluation environment for eval/rpbench (conda env `rpbench`).
+#
+# DO NOT install this into the training env (`roleplay`). vLLM pulls torch
+# 2.13, and requirements.txt pins torch 2.8.0 for reasons that still hold:
+# llamafactory 0.9.5 hard-blocks torch >=2.9.0,<2.10.0 for Conv3d models, and
+# Qwen3.5's vision tower has Conv3d. Mixing the two environments breaks
+# training. Keep them separate:
+#
+#   conda create -n rpbench python=3.12 -y -c conda-forge --override-channels
+#   conda activate rpbench
+#   pip install -r requirements-eval.txt
+#
+# Validated 2026-08-23 on NVIDIA H200 (sm90) by serving Qwen/Qwen3.5-9B with
+# both LoRA adapters loaded and generating role-play transcripts end to end.
+
+### inference server
+# Serves the base model plus both LoRA adapters from one process, hot-swapping
+# adapters per request, so base/SFT/DPO are evaluated without reloading 19GB of
+# weights three times.
+#
+# 0.27.1 is the version verified to accept these adapters. Qwen3.5 uses linear
+# attention, so the adapters target in_proj_qkv / in_proj_a / in_proj_z rather
+# than the usual q_proj/k_proj/v_proj set -- LoRA support for those modules is
+# version-specific and should be re-verified before upgrading.
+#
+# Pulls its own torch (2.13.0+cu130), transformers, and CUDA wheels; leaving it
+# unpinned would resolve to whatever is newest and may drop that LoRA support.
+vllm==0.27.1
+
+### eval clients
+# generate.py and judge.py only speak HTTP -- they need nothing from the torch
+# stack and can run from either environment. httpx already ships as a vllm
+# dependency; it is listed so the client scripts are runnable from a bare env.
+httpx>=0.27.0
+
+### data preparation
+# prepare_seeds.py downloads the pinned benchmark revision.
+huggingface_hub>=0.30.0
+
+### verify the install
+#   python -c "import vllm; print(vllm.__version__)"      # 0.27.1
+#   python -c "import torch; print(torch.__version__)"    # 2.13.0+cu130
+# Then confirm all three models are served:
+#   curl -s http://127.0.0.1:8000/v1/models
+# Expected ids: base, sft, dpo

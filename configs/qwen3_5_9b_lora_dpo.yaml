@@ -1,0 +1,68 @@
+### model
+# DPO 接在 SFT adapter 之上：create_new_adapter: true 会先把 SFT adapter 合并进
+# base 权重，再随机初始化一个全新 adapter 用于 DPO。这样隐式参考模型（LoRA 场景下
+# llamafactory 不单独加载 ref_model，而是用禁用 adapter 后的模型）恰好等于 SFT 后的
+# 模型，符合 DPO 的正确语义 —— 无需显式指定 ref_model。
+# 前置条件：saves/qwen3.5-9b/character-lora 必须已由 SFT 训练生成。
+model_name_or_path: Qwen/Qwen3.5-9B
+adapter_name_or_path: saves/qwen3.5-9b/character-lora
+template: qwen3_5_nothink
+trust_remote_code: true
+
+### method
+stage: dpo
+do_train: true
+finetuning_type: lora
+create_new_adapter: true
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target: all
+
+### DPO 超参
+# pref_loss 可选 sigmoid / hinge / ipo / kto_pair / orpo / simpo（默认 sigmoid，即标准 DPO）。
+# pref_beta 越小越允许偏离参考模型；0.1 是常用起点。
+# pref_ftx 是叠加在 DPO loss 上的 SFT 正则项权重，0 表示纯 DPO。角色一致性退化时可
+# 尝试设为 0.1 左右，用 chosen 回复做锚定。
+pref_beta: 0.1
+pref_loss: sigmoid
+pref_ftx: 0.0
+
+### dataset
+# storyplay_dpo 注册为 ranking 数据（prompt/chosen/rejected），共 3425 条。
+# 实测 prompt+max(chosen,rejected) 的 p99 仅约 683 tokens、最长 728，
+# 因此 cutoff_len: 1024 已足够，不会产生截断，也比 SFT 的 2048 更省显存。
+dataset: storyplay_dpo
+dataset_dir: data
+cutoff_len: 1024
+overwrite_cache: false
+preprocessing_num_workers: 4
+
+### output
+output_dir: saves/qwen3.5-9b/character-dpo
+logging_steps: 10
+save_steps: 200
+save_total_limit: 3
+plot_loss: true
+overwrite_output_dir: false
+
+### train
+# DPO 每步需前向 chosen 和 rejected 两条序列，显存约为同 batch SFT 的两倍，
+# 故 per_device 取 4（SFT 为 8），配 gradient_accumulation_steps: 4，
+# 有效 batch 仍为 16，与 SFT 配置保持一致。
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 4
+# DPO 的学习率必须显著低于 SFT（此处 5e-6，SFT 为 1e-4）。
+# 沿用 SFT 量级的学习率会迅速破坏已对齐的模型，是 DPO 最常见的失败原因。
+learning_rate: 5.0e-6
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+# warmup_steps 在 Transformers 5.6 中同时接受整数（步数）和 [0,1) 浮点（比例）；
+# warmup_ratio 已弃用，将在 v5.2 移除，不要使用。此处 0.1 表示总步数的 10%。
+warmup_steps: 0.1
+optim: adamw_torch
+bf16: true
+ddp_timeout: 180000000
+
+### logging
+report_to: none

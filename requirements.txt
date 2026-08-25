@@ -11,6 +11,10 @@
 #   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
 #
 # For a byte-exact reproduction of the validated env, use requirements-lock.txt.
+#
+# This file is for TRAINING only. The benchmark in eval/rpbench needs vLLM,
+# which pulls torch 2.13 and would break the pins below -- it lives in a
+# separate conda env, see requirements-eval.txt.
 
 ### torch stack — all three versions must match exactly
 # torchaudio is a HARD dependency of llamafactory (unguarded `import torchaudio`

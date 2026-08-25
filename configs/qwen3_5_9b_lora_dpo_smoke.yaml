@@ -1,0 +1,66 @@
+### DPO smoke test —— 仅用于验证启动路径，不产出可用模型。
+###
+### 与 configs/qwen3_5_9b_lora_dpo.yaml 的差异仅在于样本数、轮数和输出目录；
+### 超参保持一致，以便暴露真实配置中的参数错误。
+###
+### 用法：
+###   CONFIG_PATH=configs/qwen3_5_9b_lora_dpo_smoke.yaml bash scripts/run_train.sh
+###
+### 本项目不能用命令行参数覆盖 YAML（LLaMA-Factory 0.9.5 的 HfArgumentParser 会报
+### "Some keys are not used"），因此快速验证必须通过独立配置文件进行。
+###
+### 跑完请删除产物：rm -rf saves/_smoke_dpo
+
+### model
+# 同样需要 saves/qwen3.5-9b/character-lora 已存在。
+# 若 SFT 尚未训练完成、只想先验证 DPO 代码路径能否跑通，可临时注释掉
+# adapter_name_or_path 与 create_new_adapter 两行，直接从 base 模型做 DPO。
+model_name_or_path: Qwen/Qwen3.5-9B
+adapter_name_or_path: saves/qwen3.5-9b/character-lora
+template: qwen3_5_nothink
+trust_remote_code: true
+
+### method
+stage: dpo
+do_train: true
+finetuning_type: lora
+create_new_adapter: true
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target: all
+
+### DPO 超参
+pref_beta: 0.1
+pref_loss: sigmoid
+pref_ftx: 0.0
+
+### dataset
+dataset: storyplay_dpo
+dataset_dir: data
+cutoff_len: 1024
+overwrite_cache: false
+preprocessing_num_workers: 4
+max_samples: 20
+
+### output
+output_dir: saves/_smoke_dpo
+logging_steps: 1
+save_steps: 100000
+save_total_limit: 1
+plot_loss: false
+overwrite_output_dir: true
+
+### train
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 5.0e-6
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 0
+optim: adamw_torch
+bf16: true
+ddp_timeout: 180000000
+
+### logging
+report_to: none

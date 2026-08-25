@@ -14,3 +14,18 @@ data/raw/
 !data/dataset_info.json
 saves/*
 !saves/.gitkeep
+
+# Benchmark inputs: regenerable via prepare_seeds.py and large -- the downloaded
+# reference dialogues alone are ~250MB.
+eval/rpbench/data/
+
+# Benchmark outputs. run_eval.sh names its result directory after the user
+# simulator (results/, results_base-user/, ...), so match them all. The bulky
+# raw artifacts -- dialogue transcripts and the vLLM server log -- are
+# regenerable and stay out; the small aggregates that FINDINGS.md cites are
+# kept so its conclusions remain traceable.
+eval/rpbench/results*/*
+!eval/rpbench/results*/summary.json
+!eval/rpbench/results*/report.txt
+!eval/rpbench/results*/calibration.txt
+!eval/rpbench/results*/calib_scores.jsonl
