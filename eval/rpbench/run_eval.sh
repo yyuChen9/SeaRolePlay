@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# End-to-end role-play-bench evaluation of base / SFT / DPO.
+# End-to-end role-play-bench evaluation of any mix of local and hosted models.
 #
-# Serves all three variants from ONE vLLM process (base weights loaded once,
-# the two LoRA adapters hot-swapped per request), generates self-play
-# transcripts, scores them with the LLM judge, and prints the comparison.
+# NPC_MODELS lists the models under test. A bare name is served by the local
+# vLLM process (base weights loaded once, LoRA adapters hot-swapped per
+# request); a `label=model` pair is called over a hosted OpenAI-compatible API.
+# vLLM only starts when at least one bare name is present, so an API-only
+# comparison never touches the GPU.
 #
 # vLLM lives in its own conda env (`rpbench`) because it pulls torch 2.13,
 # which would break the training env's pinned torch 2.8.0. The generation and
@@ -14,15 +16,15 @@
 #   NUM_TURNS=60 RUNS=2 bash eval/rpbench/run_eval.sh
 #   MAX_SEEDS=3 NUM_TURNS=8 bash eval/rpbench/run_eval.sh   # quick smoke test
 #
-#   # add external reference models (no GPU needed for those)
-#   REF_MODELS="gpt52=gpt-5.2-chat" bash eval/rpbench/run_eval.sh
+#   # hosted baselines only -- no GPU, no adapters needed
+#   NPC_MODELS="gpt52=gpt-5.2-chat" bash eval/rpbench/run_eval.sh
 #
-#   # reference models only, skip vLLM entirely
-#   LOCAL_MODELS="" REF_MODELS="gpt52=gpt-5.2-chat" bash eval/rpbench/run_eval.sh
+#   # local adapters plus a hosted baseline, scored side by side
+#   NPC_MODELS="base sft dpo gpt52=gpt-5.2-chat" bash eval/rpbench/run_eval.sh
 #
 # Re-running resumes: completed dialogues and scored chunks are skipped, so an
-# interrupted run continues where it stopped. To start clean, delete
-# eval/rpbench/results/.
+# interrupted run continues where it stopped. To start clean, delete the
+# results directory (see RESULTS_DIR below).
 
 set -Eeuo pipefail
 
@@ -74,10 +76,6 @@ GPU_UTIL="${GPU_UTIL:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 
 SEEDS="${SEEDS:-eval/rpbench/data/seeds_en.json}"
-# Results from a different user simulator are not comparable with these, so the
-# default directory names the user model. The first round (user = local base)
-# is archived under results_base-user/.
-RESULTS_DIR="${RESULTS_DIR:-eval/rpbench/results}"
 NUM_TURNS="${NUM_TURNS:-40}"
 RUNS="${RUNS:-1}"
 MAX_SEEDS="${MAX_SEEDS:-0}"
@@ -94,20 +92,29 @@ CHUNK_SIZE="${CHUNK_SIZE:-20}"
 # User simulator. One fixed model plays the user for every NPC, so all models
 # under test face identical user behaviour. Leave USER_BASE_URL empty to use the
 # local vLLM server (USER_MODEL must then be a name it serves, e.g. `base`).
-USER_MODEL="${USER_MODEL:-base}"
+# No default model name: silently defaulting to a local name would point a
+# remote-only run at a vLLM server that was never started.
+USER_MODEL="${USER_MODEL:-}"
 USER_BASE_URL="${USER_BASE_URL:-}"
 USER_API_KEY="${USER_API_KEY:-}"
 
-# Local models under test (served by vLLM). Space-separated.
-LOCAL_MODELS="${LOCAL_MODELS:-base sft dpo}"
+# Models under test. A bare name is served by the local vLLM (a served-model
+# name or a LoRA adapter); `label=model` is called over a hosted API, where
+# `label` is what the results are recorded under. vLLM starts only when at
+# least one bare name is present.
+#   NPC_MODELS="base sft dpo"                     # local only
+#   NPC_MODELS="gpt52=gpt-5.2-chat"               # hosted only, no GPU
+#   NPC_MODELS="base sft gpt52=gpt-5.2-chat"      # mixed
+NPC_MODELS="${NPC_MODELS:-base sft dpo}"
+NPC_BASE_URL="${NPC_BASE_URL:-}"
+NPC_API_KEY="${NPC_API_KEY:-}"
 
-# External reference models, scored on the same seeds with the same user
-# simulator and judge for a like-for-like comparison. Space-separated list of
-# `label=model-name` pairs, empty to skip. These need no GPU.
-#   REF_MODELS="gpt52=gpt-5.2-chat fable=claude-fable-5" bash eval/rpbench/run_eval.sh
-REF_MODELS="${REF_MODELS:-}"
-REF_BASE_URL="${REF_BASE_URL:-$USER_BASE_URL}"
-REF_API_KEY="${REF_API_KEY:-$USER_API_KEY}"
+# Scores produced against different user simulators are not comparable, so the
+# results directory is named after the user model to keep them physically
+# apart. tr maps path-hostile characters (a `vendor/model` name would otherwise
+# create a nested directory).
+USER_SLUG="$(printf '%s' "$USER_MODEL" | tr -c 'A-Za-z0-9._-' '-')"
+RESULTS_DIR="${RESULTS_DIR:-eval/rpbench/results_${USER_SLUG}}"
 
 # The judge is a paid API; fail early rather than after hours of generation.
 MISSING_ENV=()
