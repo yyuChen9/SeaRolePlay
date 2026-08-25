@@ -1,4 +1,36 @@
 {
+  "seaart_sft": {
+    "file_name": "lf_data/roleplay_train.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations",
+      "system": "system",
+      "tools": "tools"
+    },
+    "tags": {
+      "role_tag": "from",
+      "content_tag": "value",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "seaart_sft_val": {
+    "file_name": "lf_data/roleplay_val.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations",
+      "system": "system",
+      "tools": "tools"
+    },
+    "tags": {
+      "role_tag": "from",
+      "content_tag": "value",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
   "storyplay_sft": {
     "file_name": "storyplay_sonnet35_charcard.json",
     "formatting": "sharegpt",

@@ -65,4 +65,5 @@ bf16: true
 ddp_timeout: 180000000
 
 ### logging
+# 同 SFT: 保持 none, 由 scripts/run_train.sh 追加 use_swanlab=true 开启上报。
 report_to: none

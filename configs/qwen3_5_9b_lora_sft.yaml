@@ -13,30 +13,55 @@ lora_dropout: 0.05
 lora_target: all
 
 ### dataset
-dataset: character
+# seaart_sft 依赖 data_process/patch_lf.py 打过的补丁: 它经 tools 字段传递
+# "前 K 个 turn 不算 loss"。补丁未打时 LF 会在 format_tools 里抛
+# RuntimeError: Invalid JSON format in tool description ——
+# 响亮失败, 不会静默训错。scripts/run_train.sh 会在启动前先行拦截。
+dataset: seaart_sft
+eval_dataset: seaart_sft_val
 dataset_dir: data
-cutoff_len: 2048
+# 32768 而非 2048。实测(Qwen3.5 tokenizer, 400 条抽样): 单条样本 P50=10.9k、
+# P90=13.8k、max=19.1k token, 其中 system 一项就占 P50 5.9k。
+# 2048 下连 system 都装不下, 一条 assistant 回复都学不到 —— 不是调优问题,
+# 是训练完全无效。32k 可容纳全部样本, 无一被截断。
+cutoff_len: 32768
 overwrite_cache: false
-preprocessing_num_workers: 4
+# 74543 条 x 32k 的 tokenize 很重, 且本机 192 核。
+preprocessing_num_workers: 16
 
 ### output
-output_dir: saves/qwen3.5-9b/character-lora
+output_dir: saves/qwen3.5-9b/seaart-sft-lora
 logging_steps: 10
 save_steps: 200
 save_total_limit: 3
 plot_loss: true
 overwrite_output_dir: false
 
+### eval
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 200
+
 ### train
-per_device_train_batch_size: 8
-gradient_accumulation_steps: 2
+# bsz 1 x accum 16。原配置是 8 x 2, 但那是 cutoff_len=2048 时的设置;
+# 序列长度涨 16 倍后单卡放不下 batch 8, 故把并行度让给梯度累积,
+# 保持等效 batch size = 16 不变。
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
 learning_rate: 1.0e-4
 num_train_epochs: 2.0
 lr_scheduler_type: cosine
 warmup_steps: 100
 optim: adamw_torch
 bf16: true
+# 32k 序列的激活值远超权重占用, 不开必然 OOM。
+gradient_checkpointing: true
 ddp_timeout: 180000000
 
 ### logging
+# 保持 none, 这样直接 `llamafactory-cli train <config>` 不会因为缺凭证而失败。
+# scripts/run_train.sh 会在命令行追加 use_swanlab=true 开启上报, 并固定
+# SWANLAB_RUN_ID(CLI 参数优先于 yaml, 见 hparams/parser.py:90-93)。
+# LF 走自己的 use_swanlab 而非 report_to —— 后者会被 parser.py:465 摘掉。
+# 不想上报时: SWANLAB=0 bash scripts/run_train.sh
 report_to: none

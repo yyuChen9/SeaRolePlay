@@ -47,6 +47,12 @@ llamafactory==0.9.5
 # fighting its resolver.
 huggingface_hub>=0.30.0
 
+### training metrics
+# scripts/run_train.sh logs to SwanLab by default (SWANLAB=0 turns it off).
+# LLaMA-Factory imports it lazily via use_swanlab (train/trainer_utils.py:850),
+# so a missing package fails only once training starts -- pin it here.
+swanlab>=0.6
+
 ### optional: flash-attention
 # Not installed in the validated env and not required -- training works without
 # it, just slower. There is no PyPI wheel (sdist only, ~30+ min compile), so use

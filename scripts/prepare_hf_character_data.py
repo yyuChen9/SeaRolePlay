@@ -128,6 +128,16 @@ def download_dataset(name: str, cache_dir: Path, revision: str | None) -> Path:
 
 
 def build_dataset_info(output_dir: Path) -> None:
+    """Register this script's outputs, merging into any existing dataset_info.json.
+
+    Merging (not overwriting) is load-bearing. The SeaArt SFT pipeline registers
+    ``seaart_sft`` / ``seaart_sft_val`` in the same file via
+    ``data_process/build_data.py``, and those entries are what
+    ``configs/qwen3_5_9b_lora_sft.yaml`` trains on. A plain write here used to
+    drop them, so running this script to prepare the DPO data silently broke SFT
+    with ``Unknown dataset: seaart_sft`` -- and the damage showed up as an
+    unexplained diff on a tracked file.
+    """
     info: dict[str, Any] = {
         "storyplay_sft": {
             "file_name": "storyplay_sonnet35_charcard.json",
@@ -159,7 +169,23 @@ def build_dataset_info(output_dir: Path) -> None:
             "columns": {"prompt": "prompt", "chosen": "chosen", "rejected": "rejected"},
         },
     }
-    write_json(output_dir / "dataset_info.json", info)
+    path = output_dir / "dataset_info.json"
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"{path} 不是合法 JSON，拒绝覆盖: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise SystemExit(f"{path} 顶层不是对象，拒绝覆盖")
+        existing = loaded
+
+    # 本脚本只对自己产出的那几个键负责；其余键(如 seaart_sft)原样保留。
+    kept = [k for k in existing if k not in info]
+    merged = {**existing, **info}
+    write_json(path, merged)
+    if kept:
+        print(f"保留已有注册项: {', '.join(sorted(kept))}", file=sys.stderr)
 
 
 def main() -> None:

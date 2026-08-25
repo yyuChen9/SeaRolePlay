@@ -105,7 +105,9 @@ USER_API_KEY="${USER_API_KEY:-}"
 #   NPC_MODELS="base sft dpo"                     # local only
 #   NPC_MODELS="gpt52=gpt-5.2-chat"               # hosted only, no GPU
 #   NPC_MODELS="base sft gpt52=gpt-5.2-chat"      # mixed
-NPC_MODELS="${NPC_MODELS:-base sft dpo}"
+# `-` not `:-`: an explicitly empty roster is an error, not a silent fallback
+# to the default three.
+NPC_MODELS="${NPC_MODELS-base sft dpo}"
 NPC_BASE_URL="${NPC_BASE_URL:-}"
 NPC_API_KEY="${NPC_API_KEY:-}"
 
@@ -116,11 +118,62 @@ NPC_API_KEY="${NPC_API_KEY:-}"
 USER_SLUG="$(printf '%s' "$USER_MODEL" | tr -c 'A-Za-z0-9._-' '-')"
 RESULTS_DIR="${RESULTS_DIR:-eval/rpbench/results_${USER_SLUG}}"
 
+# --- parse the model roster ------------------------------------------------
+# Three parallel arrays indexed together: display label, the name to send as
+# `model`, and whether it is remote. Parsed before anything else so HAS_LOCAL
+# can decide whether the GPU is needed at all.
+ALL_LABELS=()
+NPC_TARGETS=()
+NPC_REMOTE=()
+HAS_LOCAL=0
+for ENTRY in $NPC_MODELS; do
+    if [[ "$ENTRY" == *=* ]]; then
+        LABEL="${ENTRY%%=*}"
+        TARGET="${ENTRY#*=}"
+        if [[ -z "$LABEL" || -z "$TARGET" ]]; then
+            printf '[ERROR] NPC_MODELS 远程条目格式应为 label=model-name，收到: %s\n' "$ENTRY" >&2
+            exit 1
+        fi
+        NPC_REMOTE+=(1)
+    else
+        LABEL="$ENTRY"
+        TARGET="$ENTRY"
+        NPC_REMOTE+=(0)
+        HAS_LOCAL=1
+    fi
+    # Duplicate labels would append into one dialogues_<label>.jsonl. Resume
+    # dedups on (seed_id, run_id) only, so the second model's dialogues would be
+    # silently skipped as "already done".
+    for SEEN in ${ALL_LABELS[@]+"${ALL_LABELS[@]}"}; do
+        if [[ "$SEEN" == "$LABEL" ]]; then
+            printf '[ERROR] NPC_MODELS 标签重复: %s（结果会互相覆盖）\n' "$LABEL" >&2
+            exit 1
+        fi
+    done
+    ALL_LABELS+=("$LABEL")
+    NPC_TARGETS+=("$TARGET")
+done
+
+if [[ ${#ALL_LABELS[@]} -eq 0 ]]; then
+    printf '[ERROR] NPC_MODELS 为空，没有被测模型\n' >&2
+    exit 1
+fi
+
+HAS_REMOTE=0
+for IS_REMOTE in "${NPC_REMOTE[@]}"; do
+    [[ "$IS_REMOTE" -eq 1 ]] && HAS_REMOTE=1
+done
+if [[ $HAS_REMOTE -eq 1 && -z "$NPC_BASE_URL" ]]; then
+    printf '[ERROR] NPC_MODELS 含远程条目但缺少 NPC_BASE_URL（在 .env 中填写）\n' >&2
+    exit 1
+fi
+
 # The judge is a paid API; fail early rather than after hours of generation.
 MISSING_ENV=()
 [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" || -n "${JUDGE_API_KEY:-}" ]] || MISSING_ENV+=(JUDGE_API_KEY)
 [[ -n "$JUDGE_URL" ]] || MISSING_ENV+=(JUDGE_URL)
 [[ -n "$JUDGE_MODEL" ]] || MISSING_ENV+=(JUDGE_MODEL)
+[[ -n "$USER_MODEL" ]] || MISSING_ENV+=(USER_MODEL)
 if [[ ${#MISSING_ENV[@]} -gt 0 ]]; then
     printf '[ERROR] 缺少必填配置: %s\n' "${MISSING_ENV[*]}" >&2
     printf '  1. cp .env.example .env 并填入这些值（推荐）\n' >&2
@@ -137,13 +190,11 @@ if [[ -n "$USER_BASE_URL" && -z "$USER_API_KEY" ]]; then
     printf '[ERROR] USER_BASE_URL 已设置但缺少 USER_API_KEY（在 .env 中填写）\n' >&2
     exit 1
 fi
-if [[ -n "$REF_MODELS" && -z "$REF_BASE_URL" ]]; then
-    printf '[ERROR] REF_MODELS 已设置但缺少 REF_BASE_URL（或 USER_BASE_URL）\n' >&2
-    exit 1
-fi
 
-if [[ -z "$LOCAL_MODELS" && -z "$REF_MODELS" ]]; then
-    printf '[ERROR] LOCAL_MODELS 和 REF_MODELS 不能同时为空\n' >&2
+# The user simulator has no local server to fall back on in a hosted-only run.
+if [[ $HAS_LOCAL -eq 0 && -z "$USER_BASE_URL" ]]; then
+    printf '[ERROR] NPC_MODELS 全部为远程条目，但 USER_BASE_URL 为空\n' >&2
+    printf '  没有本地 vLLM 可供 user simulator 复用，请在 .env 中设置 USER_BASE_URL\n' >&2
     exit 1
 fi
 
@@ -159,13 +210,67 @@ fi
 # generated against different user models makes the scores incomparable.
 printf '[INFO] user simulator: %s @ %s\n' "$USER_MODEL" "${USER_BASE_URL:-本地 vLLM}"
 printf '[INFO] judge: %s @ %s\n' "$JUDGE_MODEL" "$JUDGE_URL"
-printf '[INFO] 本地被测: %s\n' "${LOCAL_MODELS:-（无）}"
-printf '[INFO] 外部参照: %s\n' "${REF_MODELS:-（无）}"
+printf '[INFO] 被测模型: %s\n' "$NPC_MODELS"
+[[ $HAS_REMOTE -eq 1 ]] && printf '[INFO] 远程接入点: %s\n' "$NPC_BASE_URL"
 
-if [[ -n "$LOCAL_MODELS" ]]; then
-    for path in "$SFT_ADAPTER" "$DPO_ADAPTER"; do
-        [[ -d "$path" ]] || { printf '[ERROR] adapter 不存在: %s\n' "$path" >&2; exit 1; }
-    done
+# Resolve local names to what vLLM must serve, and check only the adapters
+# actually named. Checking both adapters unconditionally would block a
+# `NPC_MODELS="base"` run just because DPO has not been trained yet.
+LORA_MODULES=()
+for INDEX in "${!ALL_LABELS[@]}"; do
+    [[ "${NPC_REMOTE[$INDEX]}" -eq 1 ]] && continue
+    case "${ALL_LABELS[$INDEX]}" in
+        base) ;;  # the served base weights, no adapter
+        sft) LORA_MODULES+=("sft=$SFT_ADAPTER") ;;
+        dpo) LORA_MODULES+=("dpo=$DPO_ADAPTER") ;;
+        *)
+            printf '[ERROR] 未知的本地模型名: %s（支持 base/sft/dpo）\n' "${ALL_LABELS[$INDEX]}" >&2
+            printf '  远程模型请用 label=model-name 的写法\n' >&2
+            exit 1
+            ;;
+    esac
+done
+for MODULE in ${LORA_MODULES[@]+"${LORA_MODULES[@]}"}; do
+    ADAPTER_PATH="${MODULE#*=}"
+    [[ -d "$ADAPTER_PATH" ]] || {
+        printf '[ERROR] adapter 不存在: %s\n' "$ADAPTER_PATH" >&2
+        exit 1
+    }
+done
+
+# vLLM reserves GPU_UTIL as a fraction of TOTAL memory, not of what is free, and
+# it only discovers the shortfall after 4-6 minutes of weight loading. On a
+# shared box (a training run, another project) that is a long wait for
+# "ValueError: Free memory on device cuda:0 ... is less than desired GPU memory
+# utilization". Check it up front instead, and name the processes holding the
+# memory so the fix is obvious.
+if [[ $HAS_LOCAL -eq 1 ]] && command -v nvidia-smi >/dev/null 2>&1; then
+    # vLLM uses the first *visible* device, which is not physical GPU 0 when
+    # CUDA_VISIBLE_DEVICES is set.
+    GPU_INDEX="${CUDA_VISIBLE_DEVICES%%,*}"
+    [[ "$GPU_INDEX" =~ ^[0-9]+$ ]] || GPU_INDEX=0
+    GPU_QUERY="$(nvidia-smi -i "$GPU_INDEX" \
+        --query-gpu=memory.total,memory.free --format=csv,noheader,nounits 2>/dev/null | head -1)"
+    TOTAL_MIB="$(printf '%s' "$GPU_QUERY" | awk -F', *' '{print $1}')"
+    FREE_MIB="$(printf '%s' "$GPU_QUERY" | awk -F', *' '{print $2}')"
+    if [[ "$TOTAL_MIB" =~ ^[0-9]+$ && "$FREE_MIB" =~ ^[0-9]+$ ]]; then
+        NEED_MIB="$(awk -v t="$TOTAL_MIB" -v u="$GPU_UTIL" 'BEGIN{printf "%d", t * u}')"
+        if [[ "$FREE_MIB" -lt "$NEED_MIB" ]]; then
+            printf '[ERROR] 显存不足: GPU %s 空闲 %d MiB，GPU_UTIL=%s 需要 %d MiB（总 %d MiB）\n' \
+                "$GPU_INDEX" "$FREE_MIB" "$GPU_UTIL" "$NEED_MIB" "$TOTAL_MIB" >&2
+            printf '  GPU_UTIL 是占「总显存」的比例，不是占空闲显存的比例。\n' >&2
+            printf '  当前占用进程：\n' >&2
+            nvidia-smi --query-compute-apps=pid,used_memory --format=csv >&2 || true
+            printf '  处理方式：等占用进程结束，或调低 GPU_UTIL（<= %.2f），\n' \
+                "$(awk -v f="$FREE_MIB" -v t="$TOTAL_MIB" 'BEGIN{printf "%.2f", f / t}')" >&2
+            printf '  或改用远程条目（NPC_MODELS="label=model-name"）完全不占 GPU。\n' >&2
+            printf '  注意：调低 GPU_UTIL 或 MAX_MODEL_LEN 会改变生成条件，\n' >&2
+            printf '  与既有结果不再严格可比。\n' >&2
+            exit 1
+        fi
+        printf '[INFO] 显存检查通过: GPU %s 空闲 %d MiB / 需要 %d MiB\n' \
+            "$GPU_INDEX" "$FREE_MIB" "$NEED_MIB"
+    fi
 fi
 
 if [[ ! -f "$SEEDS" ]]; then
@@ -178,7 +283,7 @@ fi
 mkdir -p "$RESULTS_DIR"
 
 # --- start the server -------------------------------------------------------
-# Only needed for the local models; a reference-only run skips the GPU entirely.
+# Only needed for the local models; a hosted-only run skips the GPU entirely.
 SERVER_PID=""
 cleanup() {
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -189,18 +294,26 @@ cleanup() {
     SERVER_PID=""
 }
 
-if [[ -n "$LOCAL_MODELS" ]]; then
+if [[ $HAS_LOCAL -eq 1 ]]; then
     SERVER_LOG="$RESULTS_DIR/vllm_server.log"
-    printf '[INFO] 启动 vLLM（base + 2 个 adapter），日志: %s\n' "$SERVER_LOG"
+    printf '[INFO] 启动 vLLM（base + %d 个 adapter），日志: %s\n' \
+        "${#LORA_MODULES[@]}" "$SERVER_LOG"
+
+    # --enable-lora is only passed when an adapter is actually mounted; vLLM
+    # rejects --lora-modules with an empty list.
+    LORA_ARGS=()
+    [[ ${#LORA_MODULES[@]} -gt 0 ]] && LORA_ARGS=(
+        --enable-lora
+        --lora-modules "${LORA_MODULES[@]}"
+        --max-lora-rank 8
+    )
 
     # shellcheck disable=SC1090
     source "$CONDA_SH" && conda activate "$VLLM_ENV"
     python -m vllm.entrypoints.openai.api_server \
         --model "$BASE_MODEL" \
         --served-model-name base \
-        --enable-lora \
-        --lora-modules "sft=$SFT_ADAPTER" "dpo=$DPO_ADAPTER" \
-        --max-lora-rank 8 \
+        ${LORA_ARGS[@]+"${LORA_ARGS[@]}"} \
         --max-model-len "$MAX_MODEL_LEN" \
         --gpu-memory-utilization "$GPU_UTIL" \
         --host 127.0.0.1 --port "$PORT" \
@@ -224,7 +337,7 @@ if [[ -n "$LOCAL_MODELS" ]]; then
         [[ $attempt -eq 120 ]] && { printf '[ERROR] server 启动超时（10 分钟）\n' >&2; exit 1; }
     done
 else
-    printf '[INFO] LOCAL_MODELS 为空，跳过 vLLM 启动\n'
+    printf '[INFO] 无本地被测模型，跳过 vLLM 启动\n'
 fi
 
 # --- generate + judge -------------------------------------------------------
@@ -241,51 +354,44 @@ if [[ -n "$USER_BASE_URL" ]]; then
     USER_ARGS+=(--user-base-url "$USER_BASE_URL" --user-api-key "$USER_API_KEY")
 fi
 
-ALL_LABELS=()
-
-for MODEL in $LOCAL_MODELS; do
-    printf '\n========== 生成对话: %s (本地) ==========\n' "$MODEL"
-    ALL_LABELS+=("$MODEL")
+# Generate one model's dialogues. Local entries hit the vLLM server; remote
+# entries hit the hosted gateway and drop vLLM's chat_template_kwargs.
+generate_one() {
+    local label="$1" target="$2" is_remote="$3"
+    local endpoint_args=()
+    if [[ "$is_remote" -eq 1 ]]; then
+        printf '\n========== 生成对话: %s (远程 %s) ==========\n' "$label" "$target"
+        endpoint_args=(--base-url "$NPC_BASE_URL" --api-key "$NPC_API_KEY" --remote-npc)
+    else
+        printf '\n========== 生成对话: %s (本地) ==========\n' "$label"
+        endpoint_args=(--base-url "$SERVER_URL")
+    fi
     python eval/rpbench/generate.py \
-        --label "$MODEL" \
-        --npc-model "$MODEL" \
-        --base-url "$SERVER_URL" \
+        --label "$label" \
+        --npc-model "$target" \
+        "${endpoint_args[@]}" \
         "${USER_ARGS[@]}" \
         --seeds "$SEEDS" \
-        --output "$RESULTS_DIR/dialogues_${MODEL}.jsonl" \
+        --output "$RESULTS_DIR/dialogues_${label}.jsonl" \
         --num-turns "$NUM_TURNS" \
         --runs "$RUNS" \
         --concurrency "$GEN_CONCURRENCY" \
-        "${MAX_SEEDS_ARG[@]}"
+        ${MAX_SEEDS_ARG[@]+"${MAX_SEEDS_ARG[@]}"}
+}
+
+# Local entries first, so the GPU can be released before the remote generation
+# and judging phases, which only need the hosted APIs and can run for a while.
+for INDEX in "${!ALL_LABELS[@]}"; do
+    [[ "${NPC_REMOTE[$INDEX]}" -eq 1 ]] && continue
+    generate_one "${ALL_LABELS[$INDEX]}" "${NPC_TARGETS[$INDEX]}" 0
 done
 
-# The GPU is idle from here on; free it before the reference and judging phases,
-# which only need the remote APIs and can run for a while.
 cleanup
 trap - EXIT INT TERM
 
-for PAIR in $REF_MODELS; do
-    LABEL="${PAIR%%=*}"
-    REF_MODEL="${PAIR#*=}"
-    if [[ "$LABEL" == "$PAIR" || -z "$LABEL" || -z "$REF_MODEL" ]]; then
-        printf '[ERROR] REF_MODELS 格式应为 label=model-name，收到: %s\n' "$PAIR" >&2
-        exit 1
-    fi
-    printf '\n========== 生成对话: %s (外部 %s) ==========\n' "$LABEL" "$REF_MODEL"
-    ALL_LABELS+=("$LABEL")
-    python eval/rpbench/generate.py \
-        --label "$LABEL" \
-        --npc-model "$REF_MODEL" \
-        --base-url "$REF_BASE_URL" \
-        --api-key "$REF_API_KEY" \
-        --remote-npc \
-        "${USER_ARGS[@]}" \
-        --seeds "$SEEDS" \
-        --output "$RESULTS_DIR/dialogues_${LABEL}.jsonl" \
-        --num-turns "$NUM_TURNS" \
-        --runs "$RUNS" \
-        --concurrency "$GEN_CONCURRENCY" \
-        "${MAX_SEEDS_ARG[@]}"
+for INDEX in "${!ALL_LABELS[@]}"; do
+    [[ "${NPC_REMOTE[$INDEX]}" -eq 0 ]] && continue
+    generate_one "${ALL_LABELS[$INDEX]}" "${NPC_TARGETS[$INDEX]}" 1
 done
 
 for MODEL in "${ALL_LABELS[@]}"; do

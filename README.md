@@ -88,7 +88,7 @@ bash scripts/run_chat.sh base
 bash scripts/run_chat.sh lora
 ```
 
-训练配置位于 [`configs/qwen3_5_9b_lora_sft.yaml`](configs/qwen3_5_9b_lora_sft.yaml)，adapter 输出到 `saves/qwen3.5-9b/character-lora`。
+训练配置位于 [`configs/qwen3_5_9b_lora_sft.yaml`](configs/qwen3_5_9b_lora_sft.yaml)，adapter 输出到 `saves/qwen3.5-9b/seaart-sft-lora`。
 
 模板使用 `qwen3_5_nothink`。LLaMA-Factory 0.9.5 中 `qwen3` 和 `qwen3_5` 是两个不同模板，Qwen3.5 必须用后者。`Qwen/Qwen3.5-9B` 在 LLaMA-Factory 中注册为 Thinking 版本，`_nothink` 变体用于抑制思维链输出；如需保留思维链，改为 `qwen3_5`。
 
@@ -98,9 +98,89 @@ bash scripts/run_chat.sh lora
 CONFIG_PATH=/path/to/config.yaml bash scripts/run_train.sh
 ```
 
-不要用命令行参数覆盖 YAML 里的值。在 LLaMA-Factory 0.9.5 中，`llamafactory-cli train config.yaml --max_samples 20` 这类写法会让 HfArgumentParser 把附加参数视为未使用键并报错（`Some keys are not used by the HfArgumentParser`）。所有参数都应写在 YAML 里。
+不要用 `--flag value` 形式覆盖 YAML。在 LLaMA-Factory 中 `llamafactory-cli train config.yaml --max_samples 20` 会让 HfArgumentParser 把附加参数视为未使用键并报错（`Some keys are not used by the HfArgumentParser`）。若确实要临时覆盖，用 OmegaConf 的 `key=value` 形式（`hparams/parser.py:90-93` 把它们 merge 进 YAML，命令行优先）：
 
-正式训练前建议先用少量样本做 smoke test，复制 YAML 并覆盖 `max_samples`、`num_train_epochs` 和 `output_dir`，不要覆盖正式配置的输出目录。
+```bash
+bash scripts/run_train.sh max_steps=3 output_dir=/tmp/smoke
+```
+
+正式训练前建议先用少量样本做 smoke test，覆盖 `max_samples`、`max_steps` 和 `output_dir`，不要覆盖正式配置的输出目录。
+
+### 多卡训练
+
+**本机目前只有 1 张 H200**（`nvidia-smi -L` / `torch.cuda.device_count()` 均确认），下面是换到多卡机器时的做法，未在本机验证过。
+
+启动方式不需要改脚本。LLaMA-Factory 自己判断卡数并拉起 torchrun（`launcher.py:61`），`run_train.sh` 里没有任何单卡假设：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 FORCE_TORCHRUN=1 \
+  bash scripts/run_train.sh gradient_accumulation_steps=4
+```
+
+**`gradient_accumulation_steps=4` 不是可选项，是必须的。** 有效 batch 的公式是
+`micro_batch × grad_accum × world_size`（`transformers/trainer.py:2360`），当前配置
+`1 × 16` 在 4 卡下会变成 **64**，优化器步数从 9144 掉到 2286 —— 等于换了一组超参在训练，
+而 `learning_rate: 1.0e-4` 和 `warmup_steps: 100` 都是按 batch=16 定的。改成
+`1 × 4 × 4 = 16` 才与单卡等价，结果才可比。
+
+若确实想用 batch=64 换吞吐，那是一次独立调参：同步调 LR 与 warmup，并换一个
+`output_dir`，别和单卡结果混在同一目录（`SWANLAB_RUN_ID` 由 `output_dir` 推导，
+换目录会自动开新曲线，不会覆盖旧的）。
+
+另外首次多卡启动前，先用单卡把 tokenize 缓存打出来（`overwrite_cache: false`，但缓存
+目前是空的，74543 条 × 32k 的 tokenize 很重）：
+
+```bash
+bash scripts/run_train.sh max_steps=2 output_dir=/tmp/warm_cache
+```
+
+swanlab 的 callback 有 `is_world_process_zero` 保护，只有 rank 0 上报，不会开出多条曲线。
+
+### 训练日志（swanlab）
+
+`run_train.sh` 默认把训练指标上报到 swanlab，project 为 `seaart-roleplay`（改用
+`SL_PROJECT=`，不是 `SWANLAB_PROJECT=`，原因见下）。
+
+```bash
+# 前置：在 .env 里填 SWANLAB_API_KEY，然后登录一次（凭证存 ~/.swanlab/.netrc）
+bash scripts/swanlab_login.sh
+bash scripts/swanlab_login.sh --check                # 只校验不落盘
+
+bash scripts/run_train.sh                            # 上报到 swanlab 云端
+SWANLAB_MODE=local bash scripts/run_train.sh         # 只写本地，swanlab watch 查看
+SWANLAB=0 bash scripts/run_train.sh                  # 完全不上报
+```
+
+四个设计点：
+
+- **走 LLaMA-Factory 自己的 `use_swanlab`，不走 `report_to`。** LF 内建 SwanLab 支持
+  （`hparams/finetuning_args.py:405`）并自行挂载 callback（`train/tuner.py:78`）。
+  即使写 `report_to=swanlab`，`hparams/parser.py:465` 也会把它从 `report_to` 里摘掉。
+- **run id 由 `output_dir` 推导并固定**（`saves/qwen3.5-9b/seaart-sft-lora` →
+  实验名 `qwen3.5-9b-seaart-sft-lora`）。SFT 全量耗时很长，必然会中断重跑；LF 会自动
+  从最后一个 checkpoint 续训（`hparams/parser.py:491`），但 swanlab 默认每次重启开一条
+  新实验，loss 曲线会碎成互不相连的几段。固定 `SWANLAB_RUN_ID` + `SWANLAB_RESUME=allow`
+  让每次续训落回同一条曲线。
+- **`swanlab_login.sh` 联网校验，`run_train.sh` 只做本地预检。** 两者分工不同：
+  后者只看 `Settings().api_key` 存不存在，抓不出"格式合法但 key 是错的"；前者会
+  真的打一次服务端（`relogin=True` 强制走网络，否则见到已有凭证会直接短路）。
+  正式开跑前先跑一次 login 脚本，别把 401 留到训练里。
+- **未登录时在加载模型之前就拒绝启动**。`swanlab.init()` 发生在 trainer 的
+  `on_train_begin`，即 9B 模型加载完之后。不预检的话要等十几分钟才会看到
+  `RuntimeError: Failed to initialize SwanLab in online mode: no TTY is available`。
+- **项目名用 `SL_PROJECT`，不占用 `SWANLAB_` 前缀。** swanlab 0.9.7 用
+  pydantic-settings 以 `env_prefix="SWANLAB_"` 读环境变量，其中 `project` 是嵌套
+  子模型，`SWANLAB_PROJECT=seaart-roleplay` 这种字符串会让它在 `swanlab.init()` 里抛
+  `SettingsError: error parsing value for field "project"`，训练直接中断（旧的标量
+  写法是 `SWANLAB_PROJ_NAME`）。而且 swanlab 会自行读取当前目录的 `.env`，所以这个名字
+  写进 `.env` 一样会踩雷 —— 项目名经 `swanlab_project=` 命令行参数传给 LF 即可。
+  `run_train.sh` 启动前会实例化一次 `Settings()` 预检，配错时当场报错。
+
+API key 只经环境变量传递，不作为命令行参数 —— LF 支持 `swanlab_api_key=...`，但那会
+让密钥出现在进程列表里。
+
+YAML 里的 `report_to: none` 是刻意保留的：直接 `llamafactory-cli train <config>` 时
+不会因为缺凭证而失败，上报由 `run_train.sh` 在命令行追加 `use_swanlab=true` 开启。
 
 ## DPO 训练
 

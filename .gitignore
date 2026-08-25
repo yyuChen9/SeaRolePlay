@@ -8,22 +8,39 @@ __pycache__/
 .env
 *.token
 
-# Raw/private training data and generated model artifacts
+# Raw/private training data and generated model artifacts.
+# Both .json and .jsonl: build_data.py emits JSON arrays, but upstream dumps
+# and other tooling use JSONL, and a 4.5 GB file must never reach a commit.
+# data/lf_data/ holds the converted train/val split (~4 GB) -- regenerable
+# from the upstream dump via data_process/build_data.py.
 data/*.json
+data/*.jsonl
+data/lf_data/
 data/raw/
 !data/dataset_info.json
 saves/*
 !saves/.gitkeep
+
+# SwanLab run artifacts. run_train.sh logs to SwanLab by default; local mode
+# (and the cloud mode's cache) writes run dirs to ./swanlog/. Regenerable.
+swanlog/
+
+# SwanLab credentials. `swanlab.login(save="local")` writes an API key in
+# plaintext to ./.swanlab/.netrc -- a secret, must never be committed.
+# scripts/swanlab_login.sh saves to ~/.swanlab/ instead, but ignore this
+# anyway so a stray `swanlab login --save local` can't leak the key.
+.swanlab/
 
 # Benchmark inputs: regenerable via prepare_seeds.py and large -- the downloaded
 # reference dialogues alone are ~250MB.
 eval/rpbench/data/
 
 # Benchmark outputs. run_eval.sh names its result directory after the user
-# simulator (results/, results_base-user/, ...), so match them all. The bulky
-# raw artifacts -- dialogue transcripts and the vLLM server log -- are
-# regenerable and stay out; the small aggregates that FINDINGS.md cites are
-# kept so its conclusions remain traceable.
+# simulator (results_gpt-5.2-chat/, ...) because scores from different user
+# simulators are not comparable; judge calibration lands in
+# results_calibration/. Match them all. The bulky raw artifacts -- dialogue
+# transcripts and the vLLM server log -- are regenerable and stay out; the
+# small aggregates are kept so reported conclusions remain traceable.
 eval/rpbench/results*/*
 !eval/rpbench/results*/summary.json
 !eval/rpbench/results*/report.txt
