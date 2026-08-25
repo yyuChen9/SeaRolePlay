@@ -29,7 +29,38 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-CONDA_SH="${CONDA_SH:-/workspace/projects/miniconda3/etc/profile.d/conda.sh}"
+# Load .env FIRST, before any default is applied. The loader below only fills
+# variables that are still empty, so anything defaulted above this point would
+# silently shadow the .env value and the file would appear to be ignored.
+# Values already exported in the environment still win, so a one-off
+# `JUDGE_API_KEY=... bash run_eval.sh` overrides the file.
+# .env is gitignored -- never commit it. See .env.example for the template.
+ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
+if [[ -f "$ENV_FILE" ]]; then
+    printf '[INFO] 加载环境配置: %s\n' "$ENV_FILE"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%$'\r'}"
+        [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        # Trim surrounding whitespace and optional quotes around the value.
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        [[ "$value" == \"*\" && "$value" == *\" ]] && value="${value:1:-1}"
+        [[ "$value" == \'*\' && "$value" == *\' ]] && value="${value:1:-1}"
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        # Only set if not already present, so explicit env vars take precedence.
+        [[ -z "${!key:-}" ]] && export "$key=$value"
+    done < "$ENV_FILE"
+fi
+
+# Conda entry point. Derived from whatever conda is on PATH so no machine-local
+# path is baked in; override CONDA_SH in .env when conda is not on PATH.
+if [[ -z "${CONDA_SH:-}" ]] && command -v conda >/dev/null 2>&1; then
+    CONDA_SH="$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh"
+fi
 VLLM_ENV="${VLLM_ENV:-rpbench}"
 CLIENT_ENV="${CLIENT_ENV:-roleplay}"
 
@@ -53,8 +84,10 @@ MAX_SEEDS="${MAX_SEEDS:-0}"
 GEN_CONCURRENCY="${GEN_CONCURRENCY:-16}"
 BASELINE="${BASELINE:-base}"
 
-JUDGE_MODEL="${JUDGE_MODEL:-gpt-5.6-sol}"
-JUDGE_URL="${JUDGE_URL:-https://openresty-gateway.gpu-service.dev.seaart.dev/llm/v1}"
+# Judge endpoint. No default -- the gateway is deployment-specific, so it must
+# come from .env (see .env.example).
+JUDGE_MODEL="${JUDGE_MODEL:-}"
+JUDGE_URL="${JUDGE_URL:-}"
 JUDGE_CONCURRENCY="${JUDGE_CONCURRENCY:-8}"
 CHUNK_SIZE="${CHUNK_SIZE:-20}"
 
@@ -76,37 +109,16 @@ REF_MODELS="${REF_MODELS:-}"
 REF_BASE_URL="${REF_BASE_URL:-$USER_BASE_URL}"
 REF_API_KEY="${REF_API_KEY:-$USER_API_KEY}"
 
-# Load credentials from .env if present, so the judge key does not have to be
-# pasted into every command. Values already exported in the environment win, so
-# a one-off `JUDGE_API_KEY=... bash run_eval.sh` still overrides the file.
-# .env is gitignored -- never commit it.
-ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
-if [[ -f "$ENV_FILE" ]]; then
-    printf '[INFO] 加载环境配置: %s\n' "$ENV_FILE"
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%%$'\r'}"
-        [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
-        key="${line%%=*}"
-        value="${line#*=}"
-        # Trim surrounding whitespace and optional quotes around the value.
-        key="${key#"${key%%[![:space:]]*}"}"
-        key="${key%"${key##*[![:space:]]}"}"
-        value="${value#"${value%%[![:space:]]*}"}"
-        value="${value%"${value##*[![:space:]]}"}"
-        [[ "$value" == \"*\" && "$value" == *\" ]] && value="${value:1:-1}"
-        [[ "$value" == \'*\' && "$value" == *\' ]] && value="${value:1:-1}"
-        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-        # Only set if not already present, so explicit env vars take precedence.
-        [[ -z "${!key:-}" ]] && export "$key=$value"
-    done < "$ENV_FILE"
-fi
-
 # The judge is a paid API; fail early rather than after hours of generation.
-if [[ -z "${ANTHROPIC_AUTH_TOKEN:-}" && -z "${JUDGE_API_KEY:-}" ]]; then
-    printf '[ERROR] 缺少 judge API key。三选一：\n' >&2
-    printf '  1. 复制 .env.example 为 .env 并填入 JUDGE_API_KEY\n' >&2
-    printf '  2. export JUDGE_API_KEY=...\n' >&2
-    printf '  3. JUDGE_API_KEY=... bash eval/rpbench/run_eval.sh\n' >&2
+MISSING_ENV=()
+[[ -n "${ANTHROPIC_AUTH_TOKEN:-}" || -n "${JUDGE_API_KEY:-}" ]] || MISSING_ENV+=(JUDGE_API_KEY)
+[[ -n "$JUDGE_URL" ]] || MISSING_ENV+=(JUDGE_URL)
+[[ -n "$JUDGE_MODEL" ]] || MISSING_ENV+=(JUDGE_MODEL)
+if [[ ${#MISSING_ENV[@]} -gt 0 ]]; then
+    printf '[ERROR] 缺少必填配置: %s\n' "${MISSING_ENV[*]}" >&2
+    printf '  1. cp .env.example .env 并填入这些值（推荐）\n' >&2
+    printf '  2. 或 export 同名环境变量\n' >&2
+    printf '  3. 或 JUDGE_API_KEY=... bash eval/rpbench/run_eval.sh\n' >&2
     exit 1
 fi
 export ANTHROPIC_AUTH_TOKEN="${JUDGE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
@@ -125,6 +137,14 @@ fi
 
 if [[ -z "$LOCAL_MODELS" && -z "$REF_MODELS" ]]; then
     printf '[ERROR] LOCAL_MODELS 和 REF_MODELS 不能同时为空\n' >&2
+    exit 1
+fi
+
+# Every `source "$CONDA_SH"` below assumes this resolved; fail here rather than
+# midway through with a confusing "No such file or directory".
+if [[ -z "${CONDA_SH:-}" || ! -f "$CONDA_SH" ]]; then
+    printf '[ERROR] 找不到 conda.sh: %s\n' "${CONDA_SH:-（未设置，且 conda 不在 PATH 上）}" >&2
+    printf '在 .env 中设置 CONDA_SH，例如 CONDA_SH=$HOME/miniconda3/etc/profile.d/conda.sh\n' >&2
     exit 1
 fi
 

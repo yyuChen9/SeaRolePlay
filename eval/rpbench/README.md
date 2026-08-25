@@ -48,6 +48,10 @@ source /workspace/miniconda3/etc/profile.d/conda.sh
 conda create -n rpbench python=3.12 -y -c conda-forge --override-channels
 conda activate rpbench && pip install -r requirements-eval.txt
 
+# 一次性：配置接入点与密钥
+cp .env.example .env
+# 编辑 .env，至少填入 JUDGE_API_KEY / JUDGE_URL / JUDGE_MODEL
+
 # 下载评测输入
 conda activate roleplay
 python eval/rpbench/prepare_seeds.py --lang en --with-reference
@@ -58,6 +62,11 @@ MAX_SEEDS=3 NUM_TURNS=8 CHUNK_SIZE=8 bash eval/rpbench/run_eval.sh
 # 正式评测（45 seeds x 1 run x 40 轮）
 bash eval/rpbench/run_eval.sh
 ```
+
+**所有密钥与接入点 URL 都通过 `.env` 注入，代码里没有任何默认值** —— 接入点是部署相关的，
+硬编码会跟着仓库泄露出去。`run_eval.sh` 在应用任何默认值之前加载 `.env`，缺 judge 三项配置
+会立即报错退出，不会等到跑完几小时生成才失败。已 export 的同名环境变量优先级高于文件，
+临时覆盖仍然可用。`.env` 已被 gitignore，不要提交。
 
 `run_eval.sh` 会启动一个 vLLM 进程同时服务三个模型（base 权重只加载一次，两个 LoRA adapter
 按请求热切换），依次生成对话、评分、出报告，最后自动关闭 server。

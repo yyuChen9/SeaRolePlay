@@ -210,10 +210,15 @@ def main() -> int:
     parser.add_argument("--dialogues", required=True, help="generate.py 产出的 JSONL")
     parser.add_argument("--seeds", default="eval/rpbench/data/seeds_en.json")
     parser.add_argument("--output", required=True, help="逐 chunk 评分 JSONL")
-    parser.add_argument("--judge-model", default="gpt-5.6-sol")
+    parser.add_argument(
+        "--judge-model",
+        default="",
+        help="留空则读取 JUDGE_MODEL",
+    )
     parser.add_argument(
         "--base-url",
-        default="https://openresty-gateway.gpu-service.dev.seaart.dev/llm/v1",
+        default="",
+        help="judge 接入点，留空则读取 JUDGE_URL",
     )
     parser.add_argument(
         "--api-key",
@@ -230,14 +235,29 @@ def main() -> int:
 
     import os
 
+    # Endpoint and credentials are deployment-specific and never hardcoded here:
+    # CLI flag wins, otherwise the environment (run_eval.sh loads .env into it).
     api_key = (
         args.api_key
         or os.environ.get("JUDGE_API_KEY", "")
         or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     )
-    if not api_key:
+    base_url = args.base_url or os.environ.get("JUDGE_URL", "")
+    judge_model = args.judge_model or os.environ.get("JUDGE_MODEL", "")
+
+    missing = [
+        name
+        for name, value in (
+            ("JUDGE_API_KEY", api_key),
+            ("JUDGE_URL", base_url),
+            ("JUDGE_MODEL", judge_model),
+        )
+        if not value
+    ]
+    if missing:
         raise SystemExit(
-            "缺少 API key：传入 --api-key，或设置 JUDGE_API_KEY / ANTHROPIC_AUTH_TOKEN"
+            f"缺少必填配置: {', '.join(missing)}。"
+            "请 cp .env.example .env 并填写，或用对应的命令行参数传入。"
         )
 
     seeds = {
@@ -290,7 +310,7 @@ def main() -> int:
 
     print(f"[INFO] 待评分 {len(tasks)} 个 chunk（chunk_size={args.chunk_size}），并发 {args.concurrency}")
 
-    client = JudgeClient(args.base_url, api_key, args.judge_model, args.timeout, args.retries)
+    client = JudgeClient(base_url, api_key, judge_model, args.timeout, args.retries)
     write_lock = threading.Lock()
     completed = 0
     failed = 0
