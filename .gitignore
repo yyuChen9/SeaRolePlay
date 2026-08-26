@@ -16,6 +16,9 @@ __pycache__/
 data/*.json
 data/*.jsonl
 data/lf_data/
+# tokenize 结果 (configs 里的 tokenized_path)。数十 GB 的 Arrow, 可由
+# build_data.py 的产物重新 tokenize 得到, 不入库。
+data/tokenized/
 data/raw/
 !data/dataset_info.json
 saves/*
@@ -24,6 +27,10 @@ saves/*
 # SwanLab run artifacts. run_train.sh logs to SwanLab by default; local mode
 # (and the cloud mode's cache) writes run dirs to ./swanlog/. Regenerable.
 swanlog/
+
+# Training stdout (docs/RUNBOOK.md 的启动命令会重定向到这里)。每次训练都会长,
+# 且内容大半是 \r 刷新的进度条噪音。结论性的数字请写进 docs/, 别指望日志入库。
+logs/
 
 # SwanLab credentials. `swanlab.login(save="local")` writes an API key in
 # plaintext to ./.swanlab/.netrc -- a secret, must never be committed.

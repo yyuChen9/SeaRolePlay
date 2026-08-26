@@ -4,6 +4,8 @@
 
 上一版（2026-08-14）描述的是 `/workspace/Character` 下的 0.8B 实验，与当前项目已完全不同，本文档整体重写。
 
+常用命令（启动 / 停止 / 看进度 / 启动后必查项 / 陷阱）见 **[RUNBOOK.md](RUNBOOK.md)**。本文档讲背景和设计理由。
+
 ---
 
 ## 0. 给接手 4 卡 SFT 的人：先读这一节
@@ -42,7 +44,7 @@ FORCE_TORCHRUN=1 bash scripts/run_train.sh gradient_accumulation_steps=4
 
 若确实想用 batch=64 换吞吐，那就是一次独立调参，至少要同步调 `learning_rate` 和 `warmup_steps`（100 步在 2286 步的总长里占比偏高），并且**换个 `output_dir`**，别和单卡结果混在一个目录里。
 
-### 0.2 启动方式：不需要改脚本
+### 0.2 启动方式：多卡必须先修 PATH
 
 LF 会自己判断，`launcher.py:61`：
 
@@ -50,13 +52,29 @@ LF 会自己判断，`launcher.py:61`：
 is_env_enabled("FORCE_TORCHRUN") or (get_device_count() > 1 and ...)
 ```
 
-只要能看到多张卡就自动起 torchrun，`nproc_per_node` 默认取卡数。`scripts/run_train.sh` 里没有任何单卡假设（没有 `CUDA_VISIBLE_DEVICES`、没有 `torchrun`），已确认可直接用。
+只要能看到多张卡就自动起 torchrun，`nproc_per_node` 默认取卡数。
+
+**但 `launcher.py:115` 是按裸名调 `torchrun` 的**，走 `PATH` 解析。本机 `/usr/local/bin/torchrun` 属于系统 python（`/usr/local/lib/python3.12/dist-packages/`），排在 conda env 前面，于是 4 个 rank 全部起在系统解释器下，齐刷刷报：
+
+```
+ModuleNotFoundError: No module named 'llamafactory'
+```
+
+父 shell 里的检查全部通过（它用的是 conda python），只有子进程炸 —— 所以错误看起来毫无来由。多卡启动必须显式前置 env 的 bin：
+
+```bash
+PATH=/workspace/miniconda3/envs/roleplay/bin:$PATH \
+FORCE_TORCHRUN=1 bash scripts/run_train.sh gradient_accumulation_steps=4
+```
 
 指定用哪几张卡：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 FORCE_TORCHRUN=1 bash scripts/run_train.sh gradient_accumulation_steps=4
+CUDA_VISIBLE_DEVICES=0,1,2,3 PATH=/workspace/miniconda3/envs/roleplay/bin:$PATH \
+FORCE_TORCHRUN=1 bash scripts/run_train.sh gradient_accumulation_steps=4
 ```
+
+（本节原写作"不需要改脚本"，那是在单卡机器上写的，torchrun 这条路径当时从未被走到过。2026-08-26 首次多卡启动即命中。）
 
 脚本里的 ctx-mask 补丁检查、swanlab 预检都在父 shell 里跑**一次**，然后才 exec 给 LF，不会每个 rank 重复执行 —— 这点已确认。
 

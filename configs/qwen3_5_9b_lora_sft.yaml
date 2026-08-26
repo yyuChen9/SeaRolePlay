@@ -7,11 +7,22 @@ trust_remote_code: true
 stage: sft
 do_train: true
 finetuning_type: lora
-lora_rank: 8
-lora_alpha: 16
+# alpha 必须跟着 rank 走: LoRA 输出乘的是 scaling=alpha/rank, 且 LF 只在 alpha
+# 未显式给出时才默认 rank*2 (finetuning_args.py:568) —— 这里显式写了, 所以
+# 改 rank 而不改 alpha 会让 scaling 偏离 2.0, adapter 强度整体缩放,
+# 不报错、不告警, 只是训完几乎没学到东西。64/32 = 2.0, 维持这个比例。
+lora_rank: 32
+lora_alpha: 64
 lora_dropout: 0.05
 lora_target: all
-
+# Qwen3.5-9B 是混合架构: full_attention_interval=4, 32 层里只有 8 层是 full
+# attention, 在 cutoff_len=32768 下仅占约 19% 的 FLOPs —— 装 flash-attn 收益有限。
+# 真正决定速度的是另外 24 层 linear attention 是否走 fla 的融合 kernel,
+# 见下方 packing 上面那段注释。
+# 注: fa2 在 flash-attn 未安装时不会报错, 只在 attention.py:80 打一条 warning
+# 后静默回退到 transformers 默认 (sdpa)。
+flash_attn: fa2
+packing: true
 ### dataset
 # seaart_sft 依赖 data_process/patch_lf.py 打过的补丁: 它经 tools 字段传递
 # "前 K 个 turn 不算 loss"。补丁未打时 LF 会在 format_tools 里抛
@@ -26,32 +37,44 @@ dataset_dir: data
 # 是训练完全无效。32k 可容纳全部样本, 无一被截断。
 cutoff_len: 32768
 overwrite_cache: false
-# 74543 条 x 32k 的 tokenize 很重, 且本机 192 核。
+# 73153 条 (train split) x 32k 的 tokenize 很重, 且本机 192 核。
 preprocessing_num_workers: 16
-
+# tokenize 结果落盘, 第二次启动直接 load_from_disk 读 Arrow, 省掉整轮预处理。
+# 警告 (loader.py:287-295): 该路径一旦存在, LF 会 "ignore other data arguments"
+# 直接 return —— cutoff_len / packing / template / dataset 文件的后续改动全部
+# 失效, 且不报错不告警, 只是静默拿旧数据训。所以路径名里嵌了决定性参数;
+# 改动这些参数时必须换路径名 (或 rm -rf 旧目录), 否则改了等于没改。
+tokenized_path: data/tokenized/seaart_c32768_pack_qwen3_5_nothink
+enable_liger_kernel: true
 ### output
-output_dir: saves/qwen3.5-9b/seaart-sft-lora
-logging_steps: 10
-save_steps: 200
+output_dir: saves/qwen3.5-9b/seaart-sft-lora-rank-32-bs64
+
+logging_steps: 5
+save_steps: 100
 save_total_limit: 3
 plot_loss: true
 overwrite_output_dir: false
 
 ### eval
-per_device_eval_batch_size: 1
+per_device_eval_batch_size: 2
 eval_strategy: steps
-eval_steps: 200
+eval_steps: 100
 
 ### train
-# bsz 1 x accum 16。原配置是 8 x 2, 但那是 cutoff_len=2048 时的设置;
-# 序列长度涨 16 倍后单卡放不下 batch 8, 故把并行度让给梯度累积,
-# 保持等效 batch size = 16 不变。
-per_device_train_batch_size: 1
-gradient_accumulation_steps: 16
-learning_rate: 1.0e-4
+# bsz 4 x accum 4 x 4卡 = 等效 batch 64。
+# 上限来自两处: (1) conv1d 的 int32 索引, per_device 超过 7 会抛
+# "Expected canUse32BitIndexMath"; (2) 显存, 32k x vocab 248320 的 logits
+# 是大头 —— enable_liger_kernel 的 fused CE 才让 bsz 4 装得下。实测约 120/143 GB。
+# 改这里等于改等效 batch, 那是一次独立调参: learning_rate 与 warmup_steps 都要
+# 跟着重新考虑, 且须换 output_dir, 否则会从旧 checkpoint 自动续训。
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 2.0e-4
 num_train_epochs: 2.0
 lr_scheduler_type: cosine
-warmup_steps: 100
+# 总步数 920 (29397 条 packed 样本 / 64 x 2 epoch)。50 步约占 5.4%,
+# 常规区间。注意步数随 packing 结果而变, 换数据后要重算这个比例。
+warmup_steps: 50
 optim: adamw_torch
 bf16: true
 # 32k 序列的激活值远超权重占用, 不开必然 OOM。
